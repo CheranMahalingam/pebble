@@ -8,6 +8,7 @@
 package cache
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/cockroachdb/pebble/internal/manual"
@@ -36,6 +37,7 @@ func newValue(n int) *Value {
 	// the buffer in order to reduce internal fragmentation in malloc. If the
 	// buffer is right at a power of 2, adding valueSize might push the
 	// allocation over into the next larger size.
+	fmt.Printf("ALLOC SIZE %d\n", valueSize+n)
 	b := manual.New(valueSize + n)
 	v := (*Value)(unsafe.Pointer(&b[0]))
 	v.buf = b[valueSize:]

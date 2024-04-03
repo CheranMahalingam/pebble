@@ -1622,13 +1622,22 @@ func shouldFlush(
 	}
 
 	if estimatedBlockSize >= targetBlockSize {
+		fmt.Printf("FLUSHING ESTIMATED %d TARGET %d\n", estimatedBlockSize, targetBlockSize)
 		return true
 	}
 
 	// The block is currently smaller than the target size.
-	if estimatedBlockSize <= sizeThreshold {
+	if estimatedBlockSize <= sizeThreshold-4096 {
 		// The block is smaller than the threshold size at which we'll consider
 		// flushing it.
+		newSize := estimatedBlockSize + key.Size() + valueLen
+		if numEntries%restartInterval == 0 {
+			newSize += 4
+		}
+		newSize += 4                              // varint for shared prefix length
+		newSize += uvarintLen(uint32(key.Size())) // varint for unshared key bytes
+		newSize += uvarintLen(uint32(valueLen))   // varint for value size
+		fmt.Printf("NOT FLUSHING ESTIMATED %d THRESHOLD %d NEW %d\n", estimatedBlockSize, sizeThreshold, newSize)
 		return false
 	}
 
@@ -1640,6 +1649,9 @@ func shouldFlush(
 	newSize += uvarintLen(uint32(key.Size())) // varint for unshared key bytes
 	newSize += uvarintLen(uint32(valueLen))   // varint for value size
 	// Flush if the block plus the new entry is larger than the target size.
+	if newSize > targetBlockSize {
+		fmt.Printf("FLUSHING NEW %d TARGET %d\n", newSize, targetBlockSize)
+	}
 	return newSize > targetBlockSize
 }
 
