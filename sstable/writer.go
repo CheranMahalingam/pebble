@@ -1627,7 +1627,7 @@ func shouldFlush(
 	}
 
 	// The block is currently smaller than the target size.
-	if estimatedBlockSize <= sizeThreshold-4096 {
+	if estimatedBlockSize <= sizeThreshold {
 		// The block is smaller than the threshold size at which we'll consider
 		// flushing it.
 		newSize := estimatedBlockSize + key.Size() + valueLen
