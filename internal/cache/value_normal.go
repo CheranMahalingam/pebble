@@ -14,8 +14,6 @@ import (
 	"github.com/cockroachdb/pebble/internal/manual"
 )
 
-const valueSize = int(unsafe.Sizeof(Value{}))
-
 func newValue(n int) *Value {
 	if n == 0 {
 		return nil
@@ -32,11 +30,6 @@ func newValue(n int) *Value {
 	// When we're not performing leak detection, the lifetime of the returned
 	// Value is exactly the lifetime of the backing buffer and we can manually
 	// allocate both.
-	//
-	// TODO(peter): It may be better to separate the allocation of the value and
-	// the buffer in order to reduce internal fragmentation in malloc. If the
-	// buffer is right at a power of 2, adding valueSize might push the
-	// allocation over into the next larger size.
 	fmt.Printf("ALLOC SIZE %d\n", valueSize+n)
 	b := manual.New(valueSize + n)
 	v := (*Value)(unsafe.Pointer(&b[0]))
