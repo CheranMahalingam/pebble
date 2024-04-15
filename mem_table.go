@@ -191,12 +191,18 @@ func (m *memTable) readyForFlush() bool {
 // that prepare is not thread-safe, while apply is. The caller must call
 // writerUnref() after the batch has been applied.
 func (m *memTable) prepare(batch *Batch) error {
-	avail := m.availBytes()
+	a := m.skl.Arena()
+	if m.writerRefs.Load() == 0 {
+		// If there are no other concurrent apply operations, we can update the
+		// reserved bytes setting to accurately reflect how many bytes have been
+		// allocated vs the over-estimation present in memTableSize.
+		m.reserved = a.Size()
+	}
+	avail := a.Capacity() - m.reserved
 	if batch.memTableSize > uint64(avail) {
 		return arenaskl.ErrArenaFull
 	}
 	m.reserved += uint32(batch.memTableSize)
-
 	m.writerRef()
 	return nil
 }

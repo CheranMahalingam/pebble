@@ -374,7 +374,7 @@ type DB struct {
 			// The number of input bytes to the log. This is the raw size of the
 			// batches written to the WAL, without the overhead of the record
 			// envelopes.
-			bytesIn uint64
+			bytesIn atomic.Uint64
 			// The Writer is protected by commitPipeline.mu. This allows log writes
 			// to be performed without holding DB.mu, but requires both
 			// commitPipeline.mu and DB.mu to be held when rotating the WAL/memtable
@@ -390,6 +390,7 @@ type DB struct {
 		}
 
 		mem struct {
+			maybeMutable atomic.Pointer[memTable]
 			// The current mutable memTable.
 			mutable *memTable
 			// Queue of flushables (the mutable memtable is at end). Elements are
@@ -930,28 +931,30 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
 		}
 	}
 
-	d.mu.Lock()
-
 	var err error
-	if !b.ingestedSSTBatch {
-		// Batches which contain keys of kind InternalKeyKindIngestSST will
-		// never be applied to the memtable, so we don't need to make room for
-		// write. For the other cases, switch out the memtable if there was not
-		// enough room to store the batch.
-		err = d.makeRoomForWrite(b)
+	var mem *memTable
+	// Batches which contain keys of kind InternalKeyKindIngestSST will
+	// never be applied to the memtable, so we don't need to make room for
+	// write. For the other cases, switch out the memtable if there was not
+	// enough room to store the batch.
+	if b.ingestedSSTBatch {
+		d.mu.Lock()
+		mem = d.mu.mem.mutable
+		d.mu.Unlock()
+	} else {
+		mem = d.mu.mem.maybeMutable.Load()
+		if mem != nil {
+			err = mem.prepare(b)
+		}
+
+		if mem == nil || errors.Is(err, arenaskl.ErrArenaFull) {
+			d.mu.Lock()
+			err = d.makeRoomForWrite(b)
+			mem = d.mu.mem.mutable
+			d.mu.Unlock()
+		}
 	}
 
-	if err == nil && !d.opts.DisableWAL {
-		d.mu.log.bytesIn += uint64(len(repr))
-	}
-
-	// Grab a reference to the memtable while holding DB.mu. Note that for
-	// non-flushable batches (b.flushable == nil) makeRoomForWrite() added a
-	// reference to the memtable which will prevent it from being flushed until
-	// we unreference it. This reference is dropped in DB.commitApply().
-	mem := d.mu.mem.mutable
-
-	d.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -959,6 +962,7 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
 	if d.opts.DisableWAL {
 		return mem, nil
 	}
+	d.mu.log.bytesIn.Add(uint64(len(repr)))
 
 	if b.flushable == nil {
 		size, err = d.mu.log.writer.WriteRecord(repr, wal.SyncOptions{Done: syncWG, Err: syncErr}, b.refData)
@@ -968,7 +972,47 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
 	}
 
 	d.logSize.Store(uint64(size))
-	return mem, err
+	return mem, nil
+
+	//d.mu.Lock()
+	//
+	//var err error
+	//if !b.ingestedSSTBatch {
+	//	// Batches which contain keys of kind InternalKeyKindIngestSST will
+	//	// never be applied to the memtable, so we don't need to make room for
+	//	// write. For the other cases, switch out the memtable if there was not
+	//	// enough room to store the batch.
+	//	err = d.makeRoomForWrite(b)
+	//}
+	//
+	//if err == nil && !d.opts.DisableWAL {
+	//	d.mu.log.bytesIn += uint64(len(repr))
+	//}
+	//
+	//// Grab a reference to the memtable while holding DB.mu. Note that for
+	//// non-flushable batches (b.flushable == nil) makeRoomForWrite() added a
+	//// reference to the memtable which will prevent it from being flushed until
+	//// we unreference it. This reference is dropped in DB.commitApply().
+	//mem := d.mu.mem.mutable
+	//
+	//d.mu.Unlock()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//
+	//if d.opts.DisableWAL {
+	//	return mem, nil
+	//}
+	//
+	//if b.flushable == nil {
+	//	size, err = d.mu.log.writer.WriteRecord(repr, wal.SyncOptions{Done: syncWG, Err: syncErr}, b.refData)
+	//	if err != nil {
+	//		panic(err)
+	//	}
+	//}
+	//
+	//d.logSize.Store(uint64(size))
+	//return mem, err
 }
 
 type iterAlloc struct {
@@ -1960,7 +2004,7 @@ func (d *DB) Metrics() *Metrics {
 	// d.atomic.logSize has exceeded that physical size. We allow for this
 	// anomaly.
 	metrics.WAL.PhysicalSize = walStats.LiveFileSize
-	metrics.WAL.BytesIn = d.mu.log.bytesIn // protected by d.mu
+	metrics.WAL.BytesIn = d.mu.log.bytesIn.Load()
 	metrics.WAL.Size = d.logSize.Load()
 	for i, n := 0, len(d.mu.mem.queue)-1; i < n; i++ {
 		metrics.WAL.Size += d.mu.mem.queue[i].logSize
@@ -2556,7 +2600,7 @@ func (d *DB) rotateMemtable(newLogNum base.DiskFileNum, logSeqNum uint64, prev *
 	// mechanism is dependent on being able to wait for the empty memtable to
 	// flush. We can't just mark the empty memtable as flushed here because we
 	// also have to wait for all previous immutable tables to
-	// flush. Additionally, the memtable is tied to particular WAL file and we
+	// flush. Additionally, the memtable is tied to a particular WAL file and we
 	// want to go through the flush path in order to recycle that WAL file.
 	//
 	// NB: newLogNum corresponds to the WAL that contains mutations that are
